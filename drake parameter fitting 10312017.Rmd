@@ -1,0 +1,1047 @@
+---
+title: "Parameter Estimation for Drake Enzyme Data"
+output: 
+html_document:
+keep_md: true
+toc: true
+toc_float: true
+runtime: shiny
+---
+
+1. [Plots of raw data](#raw)
+2. [Gamma distributions](#gamma)
+3. [MCMC analysis](#MCMC)
+4. [Hemlock](#hem)
+5. [Ash](#ash)
+6. [Oak](#oak)
+7. [ALL](#all)
+
+```{r setup, echo=FALSE,message=FALSE,result='hide'}
+require(shiny)
+library(rjags)
+library(R2WinBUGS)
+library(rbugs)
+library(drc)
+library(knitr)
+
+setwd("~/Dropbox/BU2017/CH3/parameterest")
+drake=read.csv(file="drake2013_trimmed.csv")
+drake=na.omit(drake)
+drakeRx=drake[-drake$activity<0,]
+
+AP=drake[drake$substrate=="AP ",]#802 rows
+AP=AP[-AP$activity<0,]
+BG=drake[drake$substrate=="BG ",] #810 rows
+BG=BG[-BG$activity<0,]
+CBH=drake[drake$substrate=="CBH",] #803 rows
+CBH=CBH[-CBH$activity<0,]
+NAG=drake[drake$substrate=="NAG",] #810 rows 
+NAG=NAG[-NAG$activity<0,]
+
+APHEM=drake[drake$substrate=="AP "& drake$species=="TSCA",]
+APHEM=APHEM[-APHEM$activity<0,]
+APASH=drake[drake$substrate=="AP "& drake$species=="FRAM",]
+APASH=APASH[-APASH$activity<0,]
+APOAK=drake[drake$substrate=="AP "& drake$species=="QURU",]
+APOAK=APOAK[-APOAK$activity<0,]
+
+BGASH=drake[drake$substrate=="BG "& drake$species=="FRAM",]
+BGASH=BGASH[-BGASH$activity<0,]
+BGHEM=drake[drake$substrate=="BG "& drake$species=="TSCA",]
+BGHEM=BGHEM[-BGHEM$activity<0,]
+BGOAK=drake[drake$substrate=="BG "& drake$species=="QURU",]
+BGOAK=BGOAK[-BGOAK$activity<0,]
+
+CBHHEM=drake[drake$substrate=="CBH"& drake$species=="TSCA",]
+CBHHEM=CBHHEM[-CBHHEM$activity<0,]
+CBHASH=drake[drake$substrate=="CBH"& drake$species=="FRAM",]
+CBHASH=CBHASH[-CBHASH$activity<0,]
+CBHOAK=drake[drake$substrate=="CBH"& drake$species=="QURU",]
+CBHOAK=CBHOAK[-CBHOAK$activity<0,]
+
+NAGHEM=drake[drake$substrate=="NAG"& drake$species=="TSCA",]
+NAGHEM=NAGHEM[-NAGHEM$activity<0,]
+NAGASH=drake[drake$substrate=="NAG"& drake$species=="FRAM",]
+NAGASH=NAGASH[-NAGASH$activity<0,]
+NAGOAK=drake[drake$substrate=="NAG"& drake$species=="QURU",]
+NAGOAK=NAGOAK[-NAGOAK$activity<0,]
+#Vm for AP expected to be close to 3 and kM close to 100
+#hist(rgamma(n=100000,shape=0.09,rate=0.10))
+subs=c(0:1000)
+```
+
+#RAW DATA PLOTS <a id="raw"></a>
+Data from Drake et al. 2013 includes the activities of the four enzymes: acid phosphatase (AP), b-1,4-glucosidase (BG), b-N-acetylglucosaminidase (NAG) and cellobiohydrolase (CBH) at three stands dominated by Eastern Hemlock (TsCa), Red Oak (QuRu), or White Ash (FrAm) measured across multiple dates.
+
+```{r, echo=FALSE}
+shinyApp(
+  ui=fluidPage(
+  selectInput("Enzyme",label = "ENZYME",choices=levels(drake$substrate)),
+  plotOutput("kinetics")
+  ),
+  server=function(input,output) {
+output$kinetics<-renderPlot({
+  plot(drake[drake$substrate==input$Enzyme,3],drake[drake$substrate==input$Enzyme,4],col=drake$species,xlab="Substrate Concentration (uM)",ylab="Activity (umol g-1 hr-1)")
+  legend("topleft",legend=c(levels(drake$species)),col=c(1,2,3),pch=16)
+})
+  },
+options = list(height = 500)
+)
+```
+
+#GAMMA DISTRIBUTION <a id="raw"></a>
+When fitting michaelis-menten curves to these data, we used priors specified by the gamma distribution. This distribution can be paramterized by the shape and rate parameters. The mean of the distribution is equal to the shape/rate, while the variance is equal to shape/rate^2. (The scale parameter used by default in R is the inverse of the rate. JAGS uses the rate parameter and not scale.) We used the following weakly informative priors in this analysis: Vm ~ dgamma(2,0.5); Km ~ dgamma(6,0.04); shape ~ dgamma(0.1,0.1).
+
+```{r, echo=FALSE}
+require(shiny)
+shinyApp(
+  ui=fluidPage(
+    fluidRow(
+      column(2,numericInput("shapeinput",label = "SHAPE",2,min=-100,max=100)),
+      column(2,numericInput("rateinput",label = "RATE",0.5,min=-100,max=100)),
+      column(2,numericInput("XAXIS",label = "X AXIS",10)),
+      column(2,numericInput("YAXIS",label = "Y AXIS",0.5)),
+      plotOutput("gammadist")
+  )),
+  server=function(input,output) {
+output$gammadist<-renderPlot({
+  x=rgamma(500,shape=input$shapeinput,rate=input$rateinput)
+  curve(dgamma(x,shape=input$shapeinput,rate=input$rateinput), col='blue',xlim=c(-1,input$XAXIS),ylim=c(0,input$YAXIS),ylab=NA,xlab=NA)
+})
+  },
+options = list(height = 500)
+)
+```
+
+#MCMC<a id="MCMC"></a>
+MCMC was run in JAGS for each stand type and enzyme separately using the following format:
+
+A michaelis menten process model for the reaction rate (Rx) specified by Vm, Km and substrate concentration (Sx).
+
+> ERx[i]<- Vm*Sx[i]/(Km+Sx[i]) 
+
+A gamma distribution for the data model, speficied by the shape parameter and the rate parameter. The rate parameter of the data model is equal to the shape over the mean. This could also be done by having a separate specification for rate itself as a second line.
+
+> Rx[i]~dgamma(shape,shape/ERx[i]) #data model
+
+Priors on Vm, Km and the shape parameter using the gamma distribution.
+
+> Vm ~ dgamma(2,0.5)
+
+> Km ~ dgamma(6,0.04)
+
+> shape ~ dgamma(0.1,0.1)
+
+Three chains were used for each MCMC, with the following initial conditions: (Km=85,Vm=0.2), (Km=92,Vm=0.3), (Km=90,Vm=0.4). We used 10000 iterations thinned by 10.
+
+Additionally, an MLE curve-fitting package was used to compare model fits.
+
+##HEMLOCK <a id="hem"></a>
+
+###AP HEM
+
+```{r, echo=FALSE,cache=TRUE}
+MMAPHEM = "
+model {
+for(i in 1:262){
+ERx[i]<- Vm*Sx[i]/(Km+Sx[i]) #process model
+Rx[i]~dgamma(shape,shape/ERx[i]) #data model
+}
+Vm ~ dgamma(2,0.5) 
+Km ~ dgamma(6,0.04)
+shape ~ dgamma(0.1,0.1)
+}"
+
+Rx = APHEM$activity
+Sx = APHEM$concentration
+
+data = list(Rx=Rx,Sx=Sx)
+init.cond <- list()
+init.cond[[1]] = list(Km=85,Vm=0.2)
+init.cond[[2]] = list(Km=92,Vm=0.3)
+init.cond[[3]] = list(Km=90,Vm=0.4)
+
+#compile JAGS model <<<<<<<<< 
+j.modelAPHEM   <- jags.model (file = textConnection(MMAPHEM),
+                         data = data,
+                         inits = init.cond, n.chains = 3)
+update(object = j.modelAPHEM,n.iter = 10000)
+MMAPHEM   <- coda.samples (model = j.modelAPHEM,
+                      variable.names = c("Vm","Km"),
+                      n.iter = 10000, thin=10)
+APHEMkm=summary(MMAPHEM)$statistics[1,1]
+APHEMvm=summary(MMAPHEM)$statistics[2,1]
+
+APHEMdrfit=drm(APHEM$activity~APHEM$concentration,fct=MM.2())
+APHEMVMfit=summary(APHEMdrfit)$coefficients[1,1] 
+APHEMKMfit=summary(APHEMdrfit)$coefficients[2,1]
+
+plot(APHEM$concentration,APHEM$activity,xlab="Concentration (uM)",ylab="Activity (umol g-1 hr-1)",main="APHEM")
+lines(subs,subs*APHEMvm/(APHEMkm+subs),lty=1,col="red")
+lines(subs,subs*APHEMVMfit/(APHEMKMfit+subs),lty=2,col="black")
+legend("topleft",ncol=2,legend=c("MLE","MCMC","Median","Mean"),col=c("black","red","blue","red"),lty=c(2,1,NA,NA),pch=c(NA,NA,16,16),bty="n")
+points(max(APHEM$concentration),median(APHEM$activity[APHEM$concentration==max(APHEM$concentration)]),pch=16, col="blue")
+points(max(APHEM$concentration),mean(APHEM$activity[APHEM$concentration==max(APHEM$concentration)]),pch=16, col="red")
+#summary(APHEM)
+```
+
+###BG HEM
+
+```{r, echo=FALSE,cache=TRUE}
+MMBGHEM = "
+model {
+for(i in 1:268){
+ERx[i]<- Vm*Sx[i]/(Km+Sx[i]) #process model
+Rx[i]~dgamma(shape,shape/ERx[i]) #data model
+}
+Vm ~ dgamma(2,0.5) 
+Km ~ dgamma(6,0.04)
+shape ~ dgamma(0.1,0.1)
+}"
+
+Rx = BGHEM$activity
+Sx = BGHEM$concentration
+
+data = list(Rx=Rx,Sx=Sx)
+init.cond <- list()
+init.cond[[1]] = list(Km=85,Vm=0.2)
+init.cond[[2]] = list(Km=92,Vm=0.3)
+init.cond[[3]] = list(Km=90,Vm=0.4)
+
+#compile JAGS model <<<<<<<<< 
+j.modelBGHEM   <- jags.model (file = textConnection(MMBGHEM),
+                              data = data,
+                              inits = init.cond, n.chains = 3)
+update(object = j.modelBGHEM,n.iter = 10000)
+MMBGHEM   <- coda.samples (model = j.modelBGHEM,
+                           variable.names = c("Vm","Km"),
+                           n.iter = 10000, thin=10)
+BGHEMkm=summary(MMBGHEM)$statistics[1,1]
+BGHEMvm=summary(MMBGHEM)$statistics[2,1]
+
+BGHEMdrfit=drm(BGHEM$activity~BGHEM$concentration,fct=MM.2())
+BGHEMVMfit=summary(BGHEMdrfit)$coefficients[1,1] 
+BGHEMKMfit=summary(BGHEMdrfit)$coefficients[2,1]
+
+plot(BGHEM$concentration,BGHEM$activity, xlab="Concentration (uM)",ylab="Activity (umol g-1 hr-1)",main="BGHEM")
+lines(subs,subs*BGHEMvm/(BGHEMkm+subs),lty=1,col="red")
+lines(subs,subs*BGHEMVMfit/(BGHEMKMfit+subs),lty=2,col="black")
+legend("topleft",ncol=2,legend=c("MLE","MCMC","Median","Mean"),col=c("black","red","blue","red"),lty=c(2,1,NA,NA),pch=c(NA,NA,16,16),bty="n")
+points(max(BGHEM$concentration),median(BGHEM$activity[BGHEM$concentration==max(BGHEM$concentration)]),pch=16, col="blue")
+points(max(BGHEM$concentration),mean(BGHEM$activity[BGHEM$concentration==max(BGHEM$concentration)]),pch=16, col="red")
+#summary(BGHEM)
+```
+
+###CBH HEM
+
+```{r,echo=FALSE,cache=TRUE}
+MMCBHHEM = "
+model {
+for(i in 1:242){
+ERx[i]<- Vm*Sx[i]/(Km+Sx[i]) #process model
+Rx[i]~dgamma(shape,shape/ERx[i]) #data model
+}
+Vm ~ dgamma(2,0.5) 
+Km ~ dgamma(6,0.04)
+shape ~ dgamma(0.1,0.1)
+}"
+
+Rx = CBHHEM$activity
+Sx = CBHHEM$concentration
+
+data = list(Rx=Rx,Sx=Sx)
+init.cond <- list()
+init.cond[[1]] = list(Km=85,Vm=0.2)
+init.cond[[2]] = list(Km=92,Vm=0.3)
+init.cond[[3]] = list(Km=90,Vm=0.4)
+
+#compile JAGS model <<<<<<<<< 
+j.modelCBHHEM   <- jags.model (file = textConnection(MMCBHHEM),
+                              data = data,
+                              inits = init.cond, n.chains = 3)
+update(object = j.modelCBHHEM,n.iter = 10000)
+MMCBHHEM   <- coda.samples (model = j.modelCBHHEM,
+                           variable.names = c("Vm","Km"),
+                           n.iter = 10000, thin=10)
+CBHHEMkm=summary(MMCBHHEM)$statistics[1,1]
+CBHHEMvm=summary(MMCBHHEM)$statistics[2,1]
+
+CBHHEMdrfit=drm(CBHHEM$activity~CBHHEM$concentration,fct=MM.2())
+CBHHEMVMfit=summary(CBHHEMdrfit)$coefficients[1,1] 
+CBHHEMKMfit=summary(CBHHEMdrfit)$coefficients[2,1]
+
+plot(CBHHEM$concentration,CBHHEM$activity, xlab="Concentration (uM)",ylab="Activity (umol g-1 hr-1)",main="CBHHEM")
+lines(subs,subs*CBHHEMvm/(CBHHEMkm+subs),lty=1,col="red")
+lines(subs,subs*CBHHEMVMfit/(CBHHEMKMfit+subs),lty=2,col="black")
+legend("topleft",ncol=2,legend=c("MLE","MCMC","Median","Mean"),col=c("black","red","blue","red"),lty=c(2,1,NA,NA),pch=c(NA,NA,16,16),bty="n")
+points(max(CBHHEM$concentration),median(CBHHEM$activity[CBHHEM$concentration==max(CBHHEM$concentration)]),pch=16, col="blue")
+points(max(CBHHEM$concentration),mean(CBHHEM$activity[CBHHEM$concentration==max(CBHHEM$concentration)]),pch=16, col="red")
+#summary(CBHHEM)
+```
+
+###NAG HEM
+
+```{r,echo=FALSE,cache=TRUE}
+MMNAGHEM = "
+model {
+for(i in 1:255){
+ERx[i]<- Vm*Sx[i]/(Km+Sx[i]) #process model
+Rx[i]~dgamma(shape,shape/ERx[i]) #data model
+}
+Vm ~ dgamma(2,0.5) 
+Km ~ dgamma(6,0.04)
+shape ~ dgamma(0.1,0.1)
+}"
+
+Rx = NAGHEM$activity
+Sx = NAGHEM$concentration
+
+data = list(Rx=Rx,Sx=Sx)
+init.cond <- list()
+init.cond[[1]] = list(Km=85,Vm=0.2)
+init.cond[[2]] = list(Km=92,Vm=0.3)
+init.cond[[3]] = list(Km=90,Vm=0.4)
+
+#compile JAGS model <<<<<<<<< 
+j.modelNAGHEM   <- jags.model (file = textConnection(MMNAGHEM),
+                              data = data,
+                              inits = init.cond, n.chains = 3)
+update(object = j.modelNAGHEM,n.iter = 10000)
+MMNAGHEM   <- coda.samples (model = j.modelNAGHEM,
+                           variable.names = c("Vm","Km"),
+                           n.iter = 10000, thin=10)
+NAGHEMkm=summary(MMNAGHEM)$statistics[1,1]
+NAGHEMvm=summary(MMNAGHEM)$statistics[2,1]
+
+NAGHEMdrfit=drm(NAGHEM$activity~NAGHEM$concentration,fct=MM.2())
+NAGHEMVMfit=summary(NAGHEMdrfit)$coefficients[1,1] 
+NAGHEMKMfit=summary(NAGHEMdrfit)$coefficients[2,1]
+
+plot(NAGHEM$concentration,NAGHEM$activity,xlab="Concentration (uM)",ylab="Activity (umol g-1 hr-1)",main="NAGHEM")
+lines(subs,subs*NAGHEMvm/(NAGHEMkm+subs),lty=1,col="red")
+lines(subs,subs*NAGHEMVMfit/(NAGHEMKMfit+subs),lty=2,col="black")
+legend("topleft",ncol=2,legend=c("MLE","MCMC","Median","Mean"),col=c("black","red","blue","red"),lty=c(2,1,NA,NA),pch=c(NA,NA,16,16),bty="n")
+points(max(NAGHEM$concentration),median(NAGHEM$activity[NAGHEM$concentration==max(NAGHEM$concentration)]),pch=16, col="blue")
+points(max(NAGHEM$concentration),mean(NAGHEM$activity[NAGHEM$concentration==max(NAGHEM$concentration)]),pch=16, col="red")
+#summary(NAGHEM)
+```
+
+##ASH <a id="ash"></a>
+
+###AP ASH
+
+```{r, echo=FALSE,cache=TRUE}
+MMAPASH = "
+model {
+for(i in 1:270){
+ERx[i]<- Vm*Sx[i]/(Km+Sx[i]) #process model
+Rx[i]~dgamma(shape,shape/ERx[i]) #data model
+}
+Vm ~ dgamma(2,0.5) 
+Km ~ dgamma(6,0.04)
+shape ~ dgamma(0.1,0.1)
+}"
+
+Rx = APASH$activity
+Sx = APASH$concentration
+
+data = list(Rx=Rx,Sx=Sx)
+init.cond <- list()
+init.cond[[1]] = list(Km=85,Vm=0.2)
+init.cond[[2]] = list(Km=92,Vm=0.3)
+init.cond[[3]] = list(Km=90,Vm=0.4)
+
+#compile JAGS model <<<<<<<<< 
+j.modelAPASH   <- jags.model (file = textConnection(MMAPASH),
+                              data = data,
+                              inits = init.cond, n.chains = 3)
+update(object = j.modelAPASH,n.iter = 10000)
+MMAPASH   <- coda.samples (model = j.modelAPASH,
+                           variable.names = c("Vm","Km"),
+                           n.iter = 10000, thin=10)
+APASHkm=summary(MMAPASH)$statistics[1,1]
+APASHvm=summary(MMAPASH)$statistics[2,1]
+
+APASHdrfit=drm(APASH$activity~APASH$concentration,fct=MM.2())
+APASHVMfit=summary(APASHdrfit)$coefficients[1,1] 
+APASHKMfit=summary(APASHdrfit)$coefficients[2,1]
+
+plot(APASH$concentration,APASH$activity,xlab="Concentration (uM)",ylab="Activity (umol g-1 hr-1)",main="APASH")
+lines(subs,subs*APASHvm/(APASHkm+subs),lty=1,col="red")
+lines(subs,subs*APASHVMfit/(APASHKMfit+subs),lty=2,col="black")
+legend("topleft",ncol=2,legend=c("MLE","MCMC","Median","Mean"),col=c("black","red","blue","red"),lty=c(2,1,NA,NA),pch=c(NA,NA,16,16),bty="n")
+points(max(APASH$concentration),median(APASH$activity[APASH$concentration==max(APASH$concentration)]),pch=16, col="blue")
+points(max(APASH$concentration),mean(APASH$activity[APASH$concentration==max(APASH$concentration)]),pch=16, col="red")
+#summary(APASH)
+```
+
+###BG ASH
+
+```{r, echo=FALSE,cache=TRUE}
+MMBGASH = "
+model {
+for(i in 1:270){
+ERx[i]<- Vm*Sx[i]/(Km+Sx[i]) #process model
+Rx[i]~dgamma(shape,shape/ERx[i]) #data model
+}
+Vm ~ dgamma(2,0.5) 
+Km ~ dgamma(6,0.04)
+shape ~ dgamma(0.1,0.1)
+}"
+
+Rx = BGASH$activity
+Sx = BGASH$concentration
+
+data = list(Rx=Rx,Sx=Sx)
+init.cond <- list()
+init.cond[[1]] = list(Km=85,Vm=0.2)
+init.cond[[2]] = list(Km=92,Vm=0.3)
+init.cond[[3]] = list(Km=90,Vm=0.4)
+
+#compile JAGS model <<<<<<<<< 
+j.modelBGASH   <- jags.model (file = textConnection(MMBGASH),
+                              data = data,
+                              inits = init.cond, n.chains = 3)
+update(object = j.modelBGASH,n.iter = 10000)
+MMBGASH   <- coda.samples (model = j.modelBGASH,
+                           variable.names = c("Vm","Km"),
+                           n.iter = 10000, thin=10)
+BGASHkm=summary(MMBGASH)$statistics[1,1]
+BGASHvm=summary(MMBGASH)$statistics[2,1]
+
+BGASHdrfit=drm(BGASH$activity~BGASH$concentration,fct=MM.2())
+BGASHVMfit=summary(BGASHdrfit)$coefficients[1,1] 
+BGASHKMfit=summary(BGASHdrfit)$coefficients[2,1]
+
+plot(BGASH$concentration,BGASH$activity,xlab="Concentration (uM)",ylab="Activity (umol g-1 hr-1)",main="BGASH")
+lines(subs,subs*BGASHvm/(BGASHkm+subs),lty=1,col="red")
+lines(subs,subs*BGASHVMfit/(BGASHKMfit+subs),lty=2,col="black")
+legend("topleft",ncol=2,legend=c("MLE","MCMC","Median","Mean"),col=c("black","red","blue","red"),lty=c(2,1,NA,NA),pch=c(NA,NA,16,16),bty="n")
+points(max(BGASH$concentration),median(BGASH$activity[BGASH$concentration==max(BGASH$concentration)]),pch=16, col="blue")
+points(max(BGASH$concentration),mean(BGASH$activity[BGASH$concentration==max(BGASH$concentration)]),pch=16, col="red")
+#summary(BGASH)
+```
+
+###CBH ASH
+
+```{r,echo=FALSE,cache=TRUE}
+MMCBHASH = "
+model {
+for(i in 1:254){
+ERx[i]<- Vm*Sx[i]/(Km+Sx[i]) #process model
+Rx[i]~dgamma(shape,shape/ERx[i]) #data model
+}
+Vm ~ dgamma(2,0.5) 
+Km ~ dgamma(6,0.04)
+shape ~ dgamma(0.1,0.1)
+}"
+
+Rx = CBHASH$activity
+Sx = CBHASH$concentration
+
+data = list(Rx=Rx,Sx=Sx)
+init.cond <- list()
+init.cond[[1]] = list(Km=85,Vm=0.2)
+init.cond[[2]] = list(Km=92,Vm=0.3)
+init.cond[[3]] = list(Km=90,Vm=0.4)
+
+#compile JAGS model <<<<<<<<< 
+j.modelCBHASH   <- jags.model (file = textConnection(MMCBHASH),
+                               data = data,
+                               inits = init.cond, n.chains = 3)
+update(object = j.modelCBHASH,n.iter = 10000)
+MMCBHASH   <- coda.samples (model = j.modelCBHASH,
+                            variable.names = c("Vm","Km"),
+                            n.iter = 10000, thin=10)
+CBHASHkm=summary(MMCBHASH)$statistics[1,1]
+CBHASHvm=summary(MMCBHASH)$statistics[2,1]
+
+CBHASHdrfit=drm(CBHASH$activity~CBHASH$concentration,fct=MM.2())
+CBHASHVMfit=summary(CBHASHdrfit)$coefficients[1,1] 
+CBHASHKMfit=summary(CBHASHdrfit)$coefficients[2,1]
+
+plot(CBHASH$concentration,CBHASH$activity,xlab="Concentration (uM)",ylab="Activity (umol g-1 hr-1)",main="CBHASH")
+lines(subs,subs*CBHASHvm/(CBHASHkm+subs),lty=1,col="red")
+lines(subs,subs*CBHASHVMfit/(CBHASHKMfit+subs),lty=2,col="black")
+legend("topleft",ncol=2,legend=c("MLE","MCMC","Median","Mean"),col=c("black","red","blue","red"),lty=c(2,1,NA,NA),pch=c(NA,NA,16,16),bty="n")
+points(max(CBHASH$concentration),median(CBHASH$activity[CBHASH$concentration==max(CBHASH$concentration)]),pch=16, col="blue")
+points(max(CBHASH$concentration),mean(CBHASH$activity[CBHASH$concentration==max(CBHASH$concentration)]),pch=16, col="red")
+#summary(CBHASH)
+```
+
+###NAG ASH
+
+```{r,echo=FALSE,cache=TRUE}
+MMNAGASH = "
+model {
+for(i in 1:263){
+ERx[i]<- Vm*Sx[i]/(Km+Sx[i]) #process model
+Rx[i]~dgamma(shape,shape/ERx[i]) #data model
+}
+Vm ~ dgamma(2,0.5) 
+Km ~ dgamma(6,0.04)
+shape ~ dgamma(0.1,0.1)
+}"
+
+Rx = NAGASH$activity
+Sx = NAGASH$concentration
+
+data = list(Rx=Rx,Sx=Sx)
+init.cond <- list()
+init.cond[[1]] = list(Km=85,Vm=0.2)
+init.cond[[2]] = list(Km=92,Vm=0.3)
+init.cond[[3]] = list(Km=90,Vm=0.4)
+
+#compile JAGS model <<<<<<<<< 
+j.modelNAGASH   <- jags.model (file = textConnection(MMNAGASH),
+                               data = data,
+                               inits = init.cond, n.chains = 3)
+update(object = j.modelNAGASH,n.iter = 10000)
+MMNAGASH   <- coda.samples (model = j.modelNAGASH,
+                            variable.names = c("Vm","Km"),
+                            n.iter = 10000, thin=10)
+NAGASHkm=summary(MMNAGASH)$statistics[1,1]
+NAGASHvm=summary(MMNAGASH)$statistics[2,1]
+
+NAGASHdrfit=drm(NAGASH$activity~NAGASH$concentration,fct=MM.2())
+NAGASHVMfit=summary(NAGASHdrfit)$coefficients[1,1] 
+NAGASHKMfit=summary(NAGASHdrfit)$coefficients[2,1]
+
+plot(NAGASH$concentration,NAGASH$activity,xlab="Concentration (uM)",ylab="Activity (umol g-1 hr-1)",main="NAGASH")
+lines(subs,subs*NAGASHvm/(NAGASHkm+subs),lty=1,col="red")
+lines(subs,subs*NAGASHVMfit/(NAGASHKMfit+subs),lty=2,col="black")
+legend("topleft",ncol=2,legend=c("MLE","MCMC","Median","Mean"),col=c("black","red","blue","red"),lty=c(2,1,NA,NA),pch=c(NA,NA,16,16),bty="n")
+points(max(NAGASH$concentration),median(NAGASH$activity[NAGASH$concentration==max(NAGASH$concentration)]),pch=16, col="blue")
+points(max(NAGASH$concentration),mean(NAGASH$activity[NAGASH$concentration==max(NAGASH$concentration)]),pch=16, col="red")
+#summary(NAGASH)
+```
+
+##OAK <a id="oak"></a>
+
+###AP OAK
+
+```{r, echo=FALSE,cache=TRUE}
+MMAPOAK = "
+model {
+for(i in 1:270){
+ERx[i]<- Vm*Sx[i]/(Km+Sx[i]) #process model
+Rx[i]~dgamma(shape,shape/ERx[i]) #data model
+}
+Vm ~ dgamma(2,0.5) 
+Km ~ dgamma(6,0.04)
+shape ~ dgamma(0.1,0.1)
+}"
+
+Rx = APOAK$activity
+Sx = APOAK$concentration
+
+data = list(Rx=Rx,Sx=Sx)
+init.cond <- list()
+init.cond[[1]] = list(Km=85,Vm=0.2)
+init.cond[[2]] = list(Km=92,Vm=0.3)
+init.cond[[3]] = list(Km=90,Vm=0.4)
+
+#compile JAGS model <<<<<<<<< 
+j.modelAPOAK   <- jags.model (file = textConnection(MMAPOAK),
+                              data = data,
+                              inits = init.cond, n.chains = 3)
+update(object = j.modelAPOAK,n.iter = 10000)
+MMAPOAK   <- coda.samples (model = j.modelAPOAK,
+                           variable.names = c("Vm","Km"),
+                           n.iter = 10000, thin=10)
+APOAKkm=summary(MMAPOAK)$statistics[1,1]
+APOAKvm=summary(MMAPOAK)$statistics[2,1]
+
+APOAKdrfit=drm(APOAK$activity~APOAK$concentration,fct=MM.2())
+APOAKVMfit=summary(APOAKdrfit)$coefficients[1,1] 
+APOAKKMfit=summary(APOAKdrfit)$coefficients[2,1]
+
+plot(APOAK$concentration,APOAK$activity,xlab="Concentration (uM)",ylab="Activity (umol g-1 hr-1)",main="APOAK")
+lines(subs,subs*APOAKvm/(APOAKkm+subs),lty=1,col="red")
+lines(subs,subs*APOAKVMfit/(APOAKKMfit+subs),lty=2,col="black")
+legend("topleft",ncol=2,legend=c("MLE","MCMC","Median","Mean"),col=c("black","red","blue","red"),lty=c(2,1,NA,NA),pch=c(NA,NA,16,16),bty="n")
+points(max(APOAK$concentration),median(APOAK$activity[APOAK$concentration==max(APOAK$concentration)]),pch=16, col="blue")
+points(max(APOAK$concentration),mean(APOAK$activity[APOAK$concentration==max(APOAK$concentration)]),pch=16, col="red")
+#summary(APOAK)
+```
+
+###BG OAK
+
+```{r, echo=FALSE,cache=TRUE}
+MMBGOAK = "
+model {
+for(i in 1:270){
+ERx[i]<- Vm*Sx[i]/(Km+Sx[i]) #process model
+Rx[i]~dgamma(shape,shape/ERx[i]) #data model
+}
+Vm ~ dgamma(2,0.5) 
+Km ~ dgamma(6,0.04)
+shape ~ dgamma(0.1,0.1)
+}"
+
+Rx = BGOAK$activity
+Sx = BGOAK$concentration
+
+data = list(Rx=Rx,Sx=Sx)
+init.cond <- list()
+init.cond[[1]] = list(Km=85,Vm=0.2)
+init.cond[[2]] = list(Km=92,Vm=0.3)
+init.cond[[3]] = list(Km=90,Vm=0.4)
+
+#compile JAGS model <<<<<<<<< 
+j.modelBGOAK   <- jags.model (file = textConnection(MMBGOAK),
+                              data = data,
+                              inits = init.cond, n.chains = 3)
+update(object = j.modelBGOAK,n.iter = 10000)
+MMBGOAK   <- coda.samples (model = j.modelBGOAK,
+                           variable.names = c("Vm","Km"),
+                           n.iter = 10000, thin=10)
+BGOAKkm=summary(MMBGOAK)$statistics[1,1]
+BGOAKvm=summary(MMBGOAK)$statistics[2,1]
+
+BGOAKdrfit=drm(BGOAK$activity~BGOAK$concentration,fct=MM.2())
+BGOAKVMfit=summary(BGOAKdrfit)$coefficients[1,1] 
+BGOAKKMfit=summary(BGOAKdrfit)$coefficients[2,1]
+
+plot(BGOAK$concentration,BGOAK$activity,xlab="Concentration (uM)",ylab="Activity (umol g-1 hr-1)",main="BGOAK")
+lines(subs,subs*BGOAKvm/(BGOAKkm+subs),lty=1,col="red")
+lines(subs,subs*BGOAKVMfit/(BGOAKKMfit+subs),lty=2,col="black")
+legend("topleft",ncol=2,legend=c("MLE","MCMC","Median","Mean"),col=c("black","red","blue","red"),lty=c(2,1,NA,NA),pch=c(NA,NA,16,16),bty="n")
+points(max(BGOAK$concentration),median(BGOAK$activity[BGOAK$concentration==max(BGOAK$concentration)]),pch=16, col="blue")
+points(max(BGOAK$concentration),mean(BGOAK$activity[BGOAK$concentration==max(BGOAK$concentration)]),pch=16, col="red")
+#summary(BGOAK)
+```
+
+###CBH OAK
+
+```{r,echo=FALSE,cache=TRUE}
+MMCBHOAK = "
+model {
+for(i in 1:257){
+ERx[i]<- Vm*Sx[i]/(Km+Sx[i]) #process model
+Rx[i]~dgamma(shape,shape/ERx[i]) #data model
+}
+Vm ~ dgamma(2,0.5) 
+Km ~ dgamma(6,0.04)
+shape ~ dgamma(0.1,0.1)
+}"
+
+Rx = CBHOAK$activity
+Sx = CBHOAK$concentration
+
+data = list(Rx=Rx,Sx=Sx)
+init.cond <- list()
+init.cond[[1]] = list(Km=85,Vm=0.2)
+init.cond[[2]] = list(Km=92,Vm=0.3)
+init.cond[[3]] = list(Km=90,Vm=0.4)
+
+#compile JAGS model <<<<<<<<< 
+j.modelCBHOAK   <- jags.model (file = textConnection(MMCBHOAK),
+                               data = data,
+                               inits = init.cond, n.chains = 3)
+update(object = j.modelCBHOAK,n.iter = 10000)
+MMCBHOAK   <- coda.samples (model = j.modelCBHOAK,
+                            variable.names = c("Vm","Km"),
+                            n.iter = 10000, thin=10)
+CBHOAKkm=summary(MMCBHOAK)$statistics[1,1]
+CBHOAKvm=summary(MMCBHOAK)$statistics[2,1]
+
+#CBHOAKdrfit=drm(CBHOAK$activity~CBHOAK$concentration,fct=MM.2())
+#CBHOAKVMfit=summary(CBHOAKdrfit)$coefficients[1,1] 
+#CBHOAKKMfit=summary(CBHOAKdrfit)$coefficients[2,1]
+
+plot(CBHOAK$concentration,CBHOAK$activity,xlab="Concentration (uM)",ylab="Activity (umol g-1 hr-1)",main="CBHOAK")
+lines(subs,subs*CBHOAKvm/(CBHOAKkm+subs),lty=1,col="red")
+#lines(subs,subs*CBHOAKVMfit/(CBHOAKKMfit+subs),lty=2,col="black")
+legend("topleft",ncol=2,legend=c("MLE","MCMC","Median","Mean"),col=c("black","red","blue","red"),lty=c(2,1,NA,NA),pch=c(NA,NA,16,16),bty="n")
+points(max(CBHOAK$concentration),median(CBHOAK$activity[CBHOAK$concentration==max(CBHOAK$concentration)]),pch=16, col="blue")
+points(max(CBHOAK$concentration),mean(CBHOAK$activity[CBHOAK$concentration==max(CBHOAK$concentration)]),pch=16, col="red")
+#summary(CBHOAK)
+```
+
+###NAG OAK
+
+```{r,echo=FALSE,cache=TRUE}
+MMNAGOAK = "
+model {
+for(i in 1:264){
+ERx[i]<- Vm*Sx[i]/(Km+Sx[i]) #process model
+Rx[i]~dgamma(shape,shape/ERx[i]) #data model
+}
+Vm ~ dgamma(2,0.5) 
+Km ~ dgamma(6,0.04)
+shape ~ dgamma(0.1,0.1)
+}"
+
+Rx = NAGOAK$activity
+Sx = NAGOAK$concentration
+
+data = list(Rx=Rx,Sx=Sx)
+init.cond <- list()
+init.cond[[1]] = list(Km=85,Vm=0.2)
+init.cond[[2]] = list(Km=92,Vm=0.3)
+init.cond[[3]] = list(Km=90,Vm=0.4)
+
+#compile JAGS model <<<<<<<<< 
+j.modelNAGOAK   <- jags.model (file = textConnection(MMNAGOAK),
+                               data = data,
+                               inits = init.cond, n.chains = 3)
+update(object = j.modelNAGOAK,n.iter = 10000)
+MMNAGOAK   <- coda.samples (model = j.modelNAGOAK,
+                            variable.names = c("Vm","Km"),
+                            n.iter = 10000, thin=10)
+NAGOAKkm=summary(MMNAGOAK)$statistics[1,1]
+NAGOAKvm=summary(MMNAGOAK)$statistics[2,1]
+
+NAGOAKdrfit=drm(NAGOAK$activity~NAGOAK$concentration,fct=MM.2())
+NAGOAKVMfit=summary(NAGOAKdrfit)$coefficients[1,1] 
+NAGOAKKMfit=summary(NAGOAKdrfit)$coefficients[2,1]
+
+plot(NAGOAK$concentration,NAGOAK$activity,xlab="Concentration (uM)",ylab="Activity (umol g-1 hr-1)",main="NAGOAK")
+lines(subs,subs*NAGOAKvm/(NAGOAKkm+subs),lty=1,col="red")
+lines(subs,subs*NAGOAKVMfit/(NAGOAKKMfit+subs),lty=2,col="black")
+legend("topleft",ncol=2,legend=c("MLE","MCMC","Median","Mean"),col=c("black","red","blue","red"),lty=c(2,1,NA,NA),pch=c(NA,NA,16,16),bty="n")
+points(max(NAGOAK$concentration),median(NAGOAK$activity[NAGOAK$concentration==max(NAGOAK$concentration)]),pch=16, col="blue")
+points(max(NAGOAK$concentration),mean(NAGOAK$activity[NAGOAK$concentration==max(NAGOAK$concentration)]),pch=16, col="red")
+#summary(NAGOAK)
+```
+
+#ENZYMES ACROSS STANDS <a id="all"></a>
+
+###NAG
+
+```{r,echo=FALSE,cache=TRUE}
+MMNAG = "
+model {
+for(i in 1:782){
+ERx[i]<- Vm*Sx[i]/(Km+Sx[i]) #process model
+Rx[i]~dgamma(shape,shape/ERx[i]) #data model
+}
+Vm ~ dgamma(2,0.5) 
+Km ~ dgamma(6,0.04)
+shape ~ dgamma(0.1,0.1)
+}"
+
+Rx = NAG$activity
+Sx = NAG$concentration
+
+data = list(Rx=Rx,Sx=Sx)
+init.cond <- list()
+init.cond[[1]] = list(Km=85,Vm=0.2)
+init.cond[[2]] = list(Km=92,Vm=0.3)
+init.cond[[3]] = list(Km=90,Vm=0.4)
+
+#compile JAGS model <<<<<<<<< 
+j.modelNAG   <- jags.model (file = textConnection(MMNAG),
+                               data = data,
+                               inits = init.cond, n.chains = 3)
+update(object = j.modelNAG,n.iter = 10000)
+MMNAG   <- coda.samples (model = j.modelNAG,
+                            variable.names = c("Vm","Km"),
+                            n.iter = 10000, thin=10)
+NAGkm=summary(MMNAG)$statistics[1,1]
+NAGvm=summary(MMNAG)$statistics[2,1]
+
+NAGdrfit=drm(NAGOAK$activity~NAGOAK$concentration,fct=MM.2())
+NAGVMfit=summary(NAGdrfit)$coefficients[1,1] 
+NAGKMfit=summary(NAGdrfit)$coefficients[2,1]
+
+plot(NAG$concentration,NAG$activity,xlab="Concentration (uM)",ylab="Activity (umol g-1 hr-1)",main="NAG")
+lines(subs,subs*NAGvm/(NAGkm+subs),lty=1,col="red")
+lines(subs,subs*NAGVMfit/(NAGKMfit+subs),lty=2,col="black")
+legend("topleft",ncol=2,legend=c("MLE","MCMC","Median","Mean"),col=c("black","red","blue","red"),lty=c(2,1,NA,NA),pch=c(NA,NA,16,16),bty="n")
+points(max(NAG$concentration),median(NAG$activity[NAG$concentration==max(NAG$concentration)]),pch=16, col="blue")
+points(max(NAG$concentration),mean(NAG$activity[NAG$concentration==max(NAG$concentration)]),pch=16, col="red")
+#summary(NAG)
+```
+
+###CBH
+
+```{r,echo=FALSE,cache=TRUE}
+MMCBH = "
+model {
+for(i in 1:753){
+ERx[i]<- Vm*Sx[i]/(Km+Sx[i]) #process model
+Rx[i]~dgamma(shape,shape/ERx[i]) #data model
+}
+Vm ~ dgamma(2,0.5) 
+Km ~ dgamma(6,0.04)
+shape ~ dgamma(0.1,0.1)
+}"
+
+Rx = CBH$activity
+Sx = CBH$concentration
+
+data = list(Rx=Rx,Sx=Sx)
+init.cond <- list()
+init.cond[[1]] = list(Km=85,Vm=0.2)
+init.cond[[2]] = list(Km=92,Vm=0.3)
+init.cond[[3]] = list(Km=90,Vm=0.4)
+
+#compile JAGS model <<<<<<<<< 
+j.modelCBH   <- jags.model (file = textConnection(MMCBH),
+                            data = data,
+                            inits = init.cond, n.chains = 3)
+update(object = j.modelCBH,n.iter = 10000)
+MMCBH   <- coda.samples (model = j.modelCBH,
+                         variable.names = c("Vm","Km"),
+                         n.iter = 10000, thin=10)
+CBHkm=summary(MMCBH)$statistics[1,1]
+CBHvm=summary(MMCBH)$statistics[2,1]
+
+#CBHdrfit=drm(CBHOAK$activity~CBHOAK$concentration,fct=MM.2())
+#CBHVMfit=summary(CBHdrfit)$coefficients[1,1] 
+#CBHKMfit=summary(CBHdrfit)$coefficients[2,1]
+
+plot(CBH$concentration,CBH$activity,xlab="Concentration (uM)",ylab="Activity (umol g-1 hr-1)",main="CBH")
+lines(subs,subs*CBHvm/(CBHkm+subs),lty=1,col="red")
+#lines(subs,subs*CBHVMfit/(CBHKMfit+subs),lty=2,col="black")
+legend("topleft",ncol=2,legend=c("MLE","MCMC","Median","Mean"),col=c("black","red","blue","red"),lty=c(2,1,NA,NA),pch=c(NA,NA,16,16),bty="n")
+points(max(CBH$concentration),median(CBH$activity[CBH$concentration==max(CBH$concentration)]),pch=16, col="blue")
+points(max(CBH$concentration),mean(CBH$activity[CBH$concentration==max(CBH$concentration)]),pch=16, col="red")
+#summary(CBH)
+```
+
+###BG
+
+```{r,echo=FALSE,cache=TRUE}
+MMBG = "
+model {
+for(i in 1:808){
+ERx[i]<- Vm*Sx[i]/(Km+Sx[i]) #process model
+Rx[i]~dgamma(shape,shape/ERx[i]) #data model
+}
+Vm ~ dgamma(2,0.5) 
+Km ~ dgamma(6,0.04)
+shape ~ dgamma(0.1,0.1)
+}"
+
+Rx = BG$activity
+Sx = BG$concentration
+
+data = list(Rx=Rx,Sx=Sx)
+init.cond <- list()
+init.cond[[1]] = list(Km=85,Vm=0.2)
+init.cond[[2]] = list(Km=92,Vm=0.3)
+init.cond[[3]] = list(Km=90,Vm=0.4)
+
+#compile JAGS model <<<<<<<<< 
+j.modelBG   <- jags.model (file = textConnection(MMBG),
+                            data = data,
+                            inits = init.cond, n.chains = 3)
+update(object = j.modelBG,n.iter = 10000)
+MMBG   <- coda.samples (model = j.modelBG,
+                         variable.names = c("Vm","Km"),
+                         n.iter = 10000, thin=10)
+BGkm=summary(MMBG)$statistics[1,1]
+BGvm=summary(MMBG)$statistics[2,1]
+
+#BGdrfit=drm(BGOAK$activity~BGOAK$concentration,fct=MM.2())
+#BGVMfit=summary(BGdrfit)$coefficients[1,1] 
+#BGKMfit=summary(BGdrfit)$coefficients[2,1]
+
+plot(BG$concentration,BG$activity,xlab="Concentration (uM)",ylab="Activity (umol g-1 hr-1)",main="BG")
+lines(subs,subs*BGvm/(BGkm+subs),lty=1,col="red")
+#lines(subs,subs*BGVMfit/(BGKMfit+subs),lty=2,col="black")
+legend("topleft",ncol=2,legend=c("MLE","MCMC","Median","Mean"),col=c("black","red","blue","red"),lty=c(2,1,NA,NA),pch=c(NA,NA,16,16),bty="n")
+points(max(BG$concentration),median(BG$activity[BG$concentration==max(BG$concentration)]),pch=16, col="blue")
+points(max(BG$concentration),mean(BG$activity[BG$concentration==max(BG$concentration)]),pch=16, col="red")
+#summary(BG)
+```
+
+###AP
+
+```{r,echo=FALSE,cache=TRUE}
+MMAP = "
+model {
+for(i in 1:802){
+ERx[i]<- Vm*Sx[i]/(Km+Sx[i]) #process model
+Rx[i]~dgamma(shape,shape/ERx[i]) #data model
+}
+Vm ~ dgamma(2,0.5) 
+Km ~ dgamma(6,0.04)
+shape ~ dgamma(0.1,0.1)
+}"
+
+Rx = AP$activity
+Sx = AP$concentration
+
+data = list(Rx=Rx,Sx=Sx)
+init.cond <- list()
+init.cond[[1]] = list(Km=85,Vm=0.2)
+init.cond[[2]] = list(Km=92,Vm=0.3)
+init.cond[[3]] = list(Km=90,Vm=0.4)
+
+#compile JAGS model <<<<<<<<< 
+j.modelAP   <- jags.model (file = textConnection(MMAP),
+                           data = data,
+                           inits = init.cond, n.chains = 3)
+update(object = j.modelAP,n.iter = 10000)
+MMAP   <- coda.samples (model = j.modelAP,
+                        variable.names = c("Vm","Km"),
+                        n.iter = 10000, thin=10)
+APkm=summary(MMAP)$statistics[1,1]
+APvm=summary(MMAP)$statistics[2,1]
+
+#APdrfit=drm(APOAK$activity~APOAK$concentration,fct=MM.2())
+#APVMfit=summary(APdrfit)$coefficients[1,1] 
+#APKMfit=summary(APdrfit)$coefficients[2,1]
+
+plot(AP$concentration,AP$activity,xlab="Concentration (uM)",ylab="Activity (umol g-1 hr-1)",main="AP")
+lines(subs,subs*APvm/(APkm+subs),lty=1,col="red")
+#lines(subs,subs*APVMfit/(APKMfit+subs),lty=2,col="black")
+legend("topleft",ncol=2,legend=c("MLE","MCMC","Median","Mean"),col=c("black","red","blue","red"),lty=c(2,1,NA,NA),pch=c(NA,NA,16,16),bty="n")
+points(max(AP$concentration),median(AP$activity[AP$concentration==max(AP$concentration)]),pch=16, col="blue")
+points(max(AP$concentration),mean(AP$activity[AP$concentration==max(AP$concentration)]),pch=16, col="red")
+#summary(AP)
+```
+
+###SINGLE MODEL
+
+```{r,echo=FALSE,cache=TRUE}
+MMALL= "
+model {
+for(i in 1:3145){
+ERx[i]<- Vm*Sx[i]/(Km+Sx[i]) #process model
+Rx[i]~dgamma(shape,shape/ERx[i]) #data model
+}
+Vm ~ dgamma(2,0.5) 
+Km ~ dgamma(6,0.04)
+shape ~ dgamma(0.1,0.1)
+}"
+
+Rx = drakeRx$activity
+Sx = drakeRx$concentration
+
+data = list(Rx=Rx,Sx=Sx)
+init.cond <- list()
+init.cond[[1]] = list(Km=85,Vm=0.2)
+init.cond[[2]] = list(Km=92,Vm=0.3)
+init.cond[[3]] = list(Km=90,Vm=0.4)
+
+#compile JAGS model <<<<<<<<< 
+j.modelALL   <- jags.model (file = textConnection(MMALL),
+                            data = data,
+                            inits = init.cond, n.chains = 3)
+update(object = j.modelALL,n.iter = 10000)
+MMALL   <- coda.samples (model = j.modelALL,
+                         variable.names = c("Vm","Km"),
+                         n.iter = 10000, thin=10)
+ALLkm=summary(MMALL)$statistics[1,1]
+ALLvm=summary(MMALL)$statistics[2,1]
+
+#ALLdrfit=drm(drakeRx$activity~drakeRx$concentration,fct=MM.2())
+#ALLVMfit=summary(ALLdrfit)$coefficients[1,1] 
+#ALLKMfit=summary(ALLdrfit)$coefficients[2,1]
+
+plot(drakeRx$concentration,drakeRx$activity,xlab="Concentration (uM)",ylab="Activity (umol g-1 hr-1)",main="ALL")
+lines(subs,subs*ALLvm/(ALLkm+subs),lty=1,col="red")
+#lines(subs,subs*ALLVMfit/(ALLKMfit+subs),lty=2,col="black")
+legend("topleft",ncol=2,legend=c("MLE","MCMC","Median","Mean"),col=c("black","red","blue","red"),lty=c(2,1,NA,NA),pch=c(NA,NA,16,16),bty="n")
+points(max(drakeRx$concentration),median(drakeRx$activity[drakeRx$concentration==max(drakeRx$concentration)]),pch=16, col="blue")
+points(max(drakeRx$concentration),mean(drakeRx$activity[drakeRx$concentration==max(drakeRx$concentration)]),pch=16, col="red")
+#summary(MMALL)
+```
+
+#SUMMARY TABLES
+
+**CBH**
+
+```{r,echo=FALSE}
+CBHsummary=matrix(NA,3,4)
+colnames(CBHsummary)=c("KM-MLE","KM-MCMC","VM-MLE","VM-MCMC")
+rownames(CBHsummary)=c("HEM","ASH","OAK")
+CBHsummary[1,1]=CBHHEMKMfit
+CBHsummary[1,2]=CBHHEMkm
+CBHsummary[1,3]=CBHHEMVMfit
+CBHsummary[1,4]=CBHHEMvm
+CBHsummary[2,1]=CBHASHKMfit
+CBHsummary[2,2]=CBHASHkm
+CBHsummary[2,3]=CBHASHVMfit
+CBHsummary[2,4]=CBHASHvm
+
+CBHsummary[3,2]=CBHOAKkm
+
+CBHsummary[3,4]=CBHOAKvm
+kable(CBHsummary)
+```
+
+**NAG**
+
+```{r,echo=FALSE}
+NAGsummary=matrix(NA,3,4)
+colnames(NAGsummary)=c("KM-MLE","KM-MCMC","VM-MLE","VM-MCMC")
+rownames(NAGsummary)=c("HEM","ASH","OAK")
+NAGsummary[1,1]=NAGHEMKMfit
+NAGsummary[1,2]=NAGHEMkm
+NAGsummary[1,3]=NAGHEMVMfit
+NAGsummary[1,4]=NAGHEMvm
+NAGsummary[2,1]=NAGASHKMfit
+NAGsummary[2,2]=NAGASHkm
+NAGsummary[2,3]=NAGASHVMfit
+NAGsummary[2,4]=NAGASHvm
+NAGsummary[3,1]=NAGOAKKMfit
+NAGsummary[3,2]=NAGOAKkm
+NAGsummary[3,3]=NAGOAKVMfit
+NAGsummary[3,4]=NAGOAKvm
+kable(NAGsummary)
+```
+
+**BG**
+
+```{r,echo=FALSE}
+BGsummary=matrix(NA,3,4)
+colnames(BGsummary)=c("KM-MLE","KM-MCMC","VM-MLE","VM-MCMC")
+rownames(BGsummary)=c("HEM","ASH","OAK")
+BGsummary[1,1]=BGHEMKMfit
+BGsummary[1,2]=BGHEMkm
+BGsummary[1,3]=BGHEMVMfit
+BGsummary[1,4]=BGHEMvm
+BGsummary[2,1]=BGASHKMfit
+BGsummary[2,2]=BGASHkm
+BGsummary[2,3]=BGASHVMfit
+BGsummary[2,4]=BGASHvm
+BGsummary[3,1]=BGOAKKMfit
+BGsummary[3,2]=BGOAKkm
+BGsummary[3,3]=BGOAKVMfit
+BGsummary[3,4]=BGOAKvm
+kable(BGsummary)
+```
+
+**AP**
+
+```{r,echo=FALSE}
+APsummary=matrix(NA,3,4)
+colnames(APsummary)=c("KM-MLE","KM-MCMC","VM-MLE","VM-MCMC")
+rownames(APsummary)=c("HEM","ASH","OAK")
+APsummary[1,1]=APHEMKMfit
+APsummary[1,2]=APHEMkm
+APsummary[1,3]=APHEMVMfit
+APsummary[1,4]=APHEMvm
+APsummary[2,1]=APASHKMfit
+APsummary[2,2]=APASHkm
+APsummary[2,3]=APASHVMfit
+APsummary[2,4]=APASHvm
+APsummary[3,1]=APOAKKMfit
+APsummary[3,2]=APOAKkm
+APsummary[3,3]=APOAKVMfit
+APsummary[3,4]=APOAKvm
+kable(APsummary)
+```
+
+```{r,echo=FALSE}
+combosummary=matrix(NA,2,5)
+colnames(APsummary)=c("KM","VM")
+rownames(APsummary)=c("CBH","NAG","AP","BG","ALL")
+combosummary[1,1]=CBHkm
+combosummary[1,2]=CBHvm
+combosummary[2,1]=NAGkm
+combosummary[2,2]=NAGvm
+combosummary[3,1]=APkm
+combosummary[3,2]=APvm
+combosummary[4,1]=BGkm
+combosummary[4,2]=BGvm
+combosummary[5,1]=ALLkm
+combosummary[5,2]=ALLvm
+kable(APsummary)
+```
