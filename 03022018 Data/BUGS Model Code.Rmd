@@ -1,0 +1,124 @@
+### Datasets
+# Microbial Biomass C (biomassC.csv)
+# Dissolved Organic C (DOC.csv)
+# Respiration (mydatafluxRight)
+
+
+
+### SIMPLIFIED MODEL AS SINGLE EQUATION
+#When using BUGS, I tried to reformat the full DAMM-MCNiP model into a single equation with respiration as the product and DOC and Microbial Biomass as inputs along with the environmental data (moisture and temperature). I am not sure if that is the best way to do it, but if it is helpful, I have pasted the equation below:
+
+
+for(i in 2:4561)
+{
+  u[i]=(1-CUE)*MIC[i-1]*(((Aupt*(exp(-Eaupt/(R*(temp[i]+273)))))*(DOC[i])/(Kmupt+DOC[i])*(Dgas*0.209*((1-(BD/PD)-theta[i]))^3/4)/(KmO2+(Dgas*0.209*((1-(BD/PD)-theta[i]))^3/4))))
+    x[i] ~ dlnorm(u[i],sigma) #data model  
+}
+
+
+##This is the code I started to develop for estimating parameters based on random draws from the datasets. This uses BUGS. The parameter estimates were never very good.
+```{r}
+library(rjags)
+library(R2WinBUGS)
+resp<-read.csv(file="mydataFluxRight.csv", sep=",",header=T, na.strings="NA") #soilM, soilT, flux data
+mic=read.csv(file="biomassC.csv")
+DOC=read.csv(file="DOC.csv")
+
+#hist(MICdist,xlab="ug C/cm3",main="Microbial Biomass C [Init=1970]")
+#abline(v=1970,lty=2,col="red")
+#hist(DOCdist,xlab="ug C/cm3",main="DOC [Init=2]")
+#abline(v=2,lty=2,col="red")
+
+MICdist=sample(mic$biomassCugCcm3,4561,replace=T)
+DOCdist=sample(DOC$DOCugCcm3,4561,replace=T)
+
+fulldamm = "
+model {
+#PRIORS
+sigma ~ dgamma(0.001,0.001) #prior on variance around observed x
+tau.t ~ dgamma(0.001,0.001) #prior on observation error
+Aupt ~ dnorm(1E11,1E3) #prior on alpha uptake (pre-exponential constant)
+Eaupt ~ dnorm(61,61) #Activation energy
+Kmupt ~ dlnorm(0,1) #half saturation constant
+KmO2 ~ dlnorm(0,1)
+CUE ~ dlnorm(0.3,0.3) 
+
+x1 ~ dnorm(0.008,0.01) #generate random number for initial value
+x[1] <-x1 
+
+#PROCESS MODEL AND CREDIBLE INTERVAL
+for(i in 2:4561)
+{
+  u[i]=(1-CUE)*MIC[i-1]*(((Aupt*(exp(-Eaupt/(R*(temp[i]+273)))))*(DOC[i])/(Kmupt+DOC[i])*(Dgas*0.209*((1-(BD/PD)-theta[i]))^3/4)/(KmO2+(Dgas*0.209*((1-(BD/PD)-theta[i]))^3/4))))
+    x[i] ~ dlnorm(u[i],sigma) #data model  
+}
+
+#PREDICTIVE INTERVAL
+for (i in 1:4561) { 
+  y[i] ~ dlnorm(x[i],tau.t) #tau.t is observation error
+  py[i] ~ dlnorm(x[i],tau.t) #predicted y
+}
+}"
+
+
+data = list("y"=resp$flux,"temp"=resp$SoilT,theta=resp$SoilM,"DOC"=DOCdist,"MIC"=MICdist,R=8.31E-3,Dgas=1.67,BD=0.8,PD=2.52)
+
+## compile JAGS model
+#CHANGE MODEL NAME AND TEXT CONNECTION  
+j.fulldamm   <- jags.model (file = textConnection(fulldamm),
+                           data = data,
+                           n.chains = 3)
+#CHANGE OBJECT NAME
+update(object = j.fulldamm,n.iter = 500) #burn in by 500
+
+#CHANGE OUTPUT OBJECT AND MODEL NAME
+outfulldamm  <- coda.samples (model = j.fulldamm,
+                              variable.names = c("py","u","x"),
+                              n.iter = 10000, thin=50)
+
+outfulldammparam  <- coda.samples (model = j.fulldamm,
+                              variable.names = c("Eaupt","Aupt","CUE","Kmupt","KmO2"),
+                              n.iter = 10000, thin=50)
+
+#py is 1:4561
+#u is 4562:9123
+#x is 9124:13684
+
+means=summary(outfulldamm)$statistics[,1]
+quantiles=summary(outfulldamm)$quantiles
+
+#PLOT
+plot(means[9123:13682],col="green",cex=0.5,ylim=c(-3E-3,5E-3),main="Full DAMM",xlab="timepoint",ylab="respiration") #x means
+plot(means[4561:9121],col="red",cex=0.5,ylim=c(-3E-3,5E-3),main="Full DAMM",xlab="timepoint",ylab="respiration") #u means
+
+#PREDICTIVE INTERVAL
+lines(quantiles[1:4561,1],col="gray",cex=0.3)
+lines(quantiles[1:4561,5],col="gray",cex=0.3)
+
+#DATA
+points(resp$flux,col="blue",cex=0.5) #data
+legend("topright",col=c("gray","blue","green"),legend=c("PI","DATA","MODEL"),pch=16,cex=0.75)
+
+#SUMMARY TABLES
+summary(outfulldammparam)
+
+#CONFIDENCE INTERVAL
+#lines(quantiles[9123:13682,2],col="blue",lwd=0.5) #CI interval
+#lines(quantiles[9123:13682,4],col="blue",lwd=0.5)
+
+#CORRELATIONS
+plot(means[9123:13682],resp$flux[2:4561],xlim=c(0,0.003),ylim=c(0,0.003),xlab="x means",ylab="empirical")
+abline(0,1,col="red")
+plot(means[4563:9122],resp$flux[2:4561],xlim=c(0,0.003),ylim=c(0,0.003),xlab="u means",ylab="empirical")
+abline(0,1,col="red")
+plot(means[2:4561],resp$flux[2:4561],xlim=c(0,0.003),ylim=c(0,0.003),xlab="py means",ylab="empirical")
+abline(0,1,col="red")
+plot(means[2:4561],means[9123:13682],xlim=c(0,0.003),ylim=c(0,0.003),xlab="py means",ylab="xmeans")
+abline(0,1,col="red")
+
+#lines(summary(outfulldamm)$quantiles[3:4560,2],col=2) #CI
+#lines(summary(outfulldamm)$quantiles[3:4560,4],col=2) #CI
+#lines(summary(outfulldamm)$quantiles[3:4560,2],col=3) #PI
+#lines(summary(outfulldamm)$quantiles[3:4560,4],col=3) #PI
+
+```
