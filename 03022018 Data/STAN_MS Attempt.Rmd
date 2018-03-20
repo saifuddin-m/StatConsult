@@ -60,8 +60,6 @@ shape ~ gamma(0.1,0.1);
 
 comp_stan <- stan_model(model_code = stan_code)  #Compile stan code and then call it in r which will save a lot of time by not recompiling each time fitting different datasets. If you can't compile the stan code, go to chunk 4 and run the 'stan()' function by deleting '##'. If you can, run the rest of chunks as usual.
 
-##THIS WORKS BUT PRODUCES A BUNCH OF WARNINGS THAT I DO NOT UNDERSTAND##
-
 ```
 
 
