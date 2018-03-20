@@ -28,7 +28,7 @@ data {
   real Dgas;
   real BD;
   real PD;
-  real R;
+  real cue;
 }
 
 parameters{
@@ -47,16 +47,20 @@ transformed parameters{
 }
 
 model{
-cue ~ normal(0.3,0.05); 
-Aupt ~ normal(1E8,0.05);
-Eaupt ~ normal(96,2);
-Kmupt ~ normal(1,0.1);
-KmO2 ~ normal(1,0.1);
+cue ~ gamma(3,10); 
+Aupt ~ gamma(1E8,0.001);
+Eaupt ~ gamma(61,1);
+Kmupt ~ gamma(3,10);
+KmO2 ~ gamma(1,10);
 shape ~ gamma(0.1,0.1);
   for(i in 1:I)
    cmin3[i] ~ gamma(shape,shape/Ecmin[i]);
 }
 "
+
+Kmupt ~ dlnorm(0,1) #half saturation constant for uptake
+KmO2 ~ dlnorm(0,1) #half saturation constant for O2
+CUE ~ dlnorm(0.3,0.3) #carbon use efficiency
 
 comp_stan <- stan_model(model_code = stan_code)  #Compile stan code and then call it in r which will save a lot of time by not recompiling each time fitting different datasets. If you can't compile the stan code, go to chunk 4 and run the 'stan()' function by deleting '##'. If you can, run the rest of chunks as usual.
 
