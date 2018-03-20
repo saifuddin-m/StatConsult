@@ -28,11 +28,11 @@ data {
   real Dgas;
   real BD;
   real PD;
-  real cue;
+  real R;
 }
 
 parameters{
-  real cue;
+  real cue;  
   real Aupt;
   real Eaupt;
   real Kmupt;
@@ -58,31 +58,12 @@ shape ~ gamma(0.1,0.1);
 }
 "
 
-Kmupt ~ dlnorm(0,1) #half saturation constant for uptake
-KmO2 ~ dlnorm(0,1) #half saturation constant for O2
-CUE ~ dlnorm(0.3,0.3) #carbon use efficiency
-
 comp_stan <- stan_model(model_code = stan_code)  #Compile stan code and then call it in r which will save a lot of time by not recompiling each time fitting different datasets. If you can't compile the stan code, go to chunk 4 and run the 'stan()' function by deleting '##'. If you can, run the rest of chunks as usual.
 
 ```
 
 
 ```{r}
-ACTUAL = "
-model {
-for (i in 1:4561){
-Ecmin[i] <- (1-cue)*mic*(((Aupt*(exp(-Eaupt/(R*(temp[i]+273)))))*(DOC)/(Kmupt+DOC)*(Dgas*0.209*((1-(BD/PD)-theta[i]))^3/4)/(KmO2+(Dgas*0.209*((1-(BD/PD)-theta[i]))^3/4))))
-cmin3[i] ~ dgamma(shape,shape/Ecmin[i])
-}
-
-shape ~ dgamma(0.1,0.1)
-Aupt ~ norm(1E8,0.05)
-Eaupt ~ gamma(96,2)
-Kmupt ~ gamma(1,4)
-KmO2 ~ gamma(1,4)
-cue ~ norm(0.3,0.05)
-}"
-
 resp<-read.csv(file="mydataFluxRight.csv", sep=",",header=T, na.strings="NA") #soilM, soilT, flux data
 R<-0.008314
 temp<-resp$SoilT
