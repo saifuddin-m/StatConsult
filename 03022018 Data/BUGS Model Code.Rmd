@@ -23,14 +23,17 @@ library(R2WinBUGS)
 resp<-read.csv(file="mydataFluxRight.csv", sep=",",header=T, na.strings="NA") #soilM, soilT, flux data
 mic=read.csv(file="biomassC.csv")
 DOC=read.csv(file="DOC.csv")
-
-#hist(MICdist,xlab="ug C/cm3",main="Microbial Biomass C [Init=1970]")
-#abline(v=1970,lty=2,col="red")
-#hist(DOCdist,xlab="ug C/cm3",main="DOC [Init=2]")
-#abline(v=2,lty=2,col="red")
-
 MICdist=sample(mic$biomassCugCcm3,4561,replace=T)
 DOCdist=sample(DOC$DOCugCcm3,4561,replace=T)
+
+#Histogram of Microbial Biomass distribution with initial pool size as red dotted line
+hist(MICdist,xlab="ug C/cm3",main="Microbial Biomass C [Init=1970]")
+abline(v=1970,lty=2,col="red")
+
+#Histogram of DOC distribution with initial pool size as red dotted line
+hist(DOCdist,xlab="ug C/cm3",main="DOC [Init=2]")
+abline(v=2,lty=2,col="red")
+
 
 fulldamm = "
 model {
@@ -39,9 +42,9 @@ sigma ~ dgamma(0.001,0.001) #prior on variance around observed x
 tau.t ~ dgamma(0.001,0.001) #prior on observation error
 Aupt ~ dnorm(1E11,1E3) #prior on alpha uptake (pre-exponential constant)
 Eaupt ~ dnorm(61,61) #Activation energy
-Kmupt ~ dlnorm(0,1) #half saturation constant
-KmO2 ~ dlnorm(0,1)
-CUE ~ dlnorm(0.3,0.3) 
+Kmupt ~ dlnorm(0,1) #half saturation constant for uptake
+KmO2 ~ dlnorm(0,1) #half saturation constant for O2
+CUE ~ dlnorm(0.3,0.3) #carbon use efficiency
 
 x1 ~ dnorm(0.008,0.01) #generate random number for initial value
 x[1] <-x1 
