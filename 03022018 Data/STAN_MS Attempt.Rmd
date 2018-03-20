@@ -1,0 +1,133 @@
+---
+title: "Rstan for estimating Km & Vm"
+author: "Team Kermit"
+date: "2018/3"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rstan)
+library(dplyr)
+library(ggplot2)
+```
+
+```{r}
+#Prepare rstan code
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+stan_code <- "
+data {
+  int<lower = 0> I; 
+  real cmin3[I];
+  real mic[I];
+  real DOC[I];
+  real temp[I];
+  real theta[I];
+  real Dgas;
+  real BD;
+  real PD;
+  real R;
+}
+
+parameters{
+  real cue;
+  real Aupt;
+  real Eaupt;
+  real Kmupt;
+  real KmO2;
+  real shape;
+}
+
+transformed parameters{
+  real Ecmin[I];
+  for (i in 1:I)
+  Ecmin[i] = (1-cue)*mic[i]*(((Aupt*(exp(-Eaupt/(R*(temp[i]+273)))))*(DOC[i])/(Kmupt+DOC[i])*(Dgas*0.209*((1-(BD/PD)-theta[i]))^3/4)/(KmO2+(Dgas*0.209*((1-(BD/PD)-theta[i]))^3/4))));
+}
+
+model{
+cue ~ normal(0.3,0.05); 
+Aupt ~ normal(1E8,0.05);
+Eaupt ~ normal(96,2);
+Kmupt ~ normal(1,0.1);
+KmO2 ~ normal(1,0.1);
+shape ~ gamma(0.1,0.1);
+  for(i in 1:I)
+   cmin3[i] ~ gamma(shape,shape/Ecmin[i]);
+}
+"
+
+comp_stan <- stan_model(model_code = stan_code)  #Compile stan code and then call it in r which will save a lot of time by not recompiling each time fitting different datasets. If you can't compile the stan code, go to chunk 4 and run the 'stan()' function by deleting '##'. If you can, run the rest of chunks as usual.
+
+##THIS WORKS BUT PRODUCES A BUNCH OF WARNINGS THAT I DO NOT UNDERSTAND##
+
+```
+
+
+```{r}
+ACTUAL = "
+model {
+for (i in 1:4561){
+Ecmin[i] <- (1-cue)*mic*(((Aupt*(exp(-Eaupt/(R*(temp[i]+273)))))*(DOC)/(Kmupt+DOC)*(Dgas*0.209*((1-(BD/PD)-theta[i]))^3/4)/(KmO2+(Dgas*0.209*((1-(BD/PD)-theta[i]))^3/4))))
+cmin3[i] ~ dgamma(shape,shape/Ecmin[i])
+}
+
+shape ~ dgamma(0.1,0.1)
+Aupt ~ norm(1E8,0.05)
+Eaupt ~ gamma(96,2)
+Kmupt ~ gamma(1,4)
+KmO2 ~ gamma(1,4)
+cue ~ norm(0.3,0.05)
+}"
+
+resp<-read.csv(file="mydataFluxRight.csv", sep=",",header=T, na.strings="NA") #soilM, soilT, flux data
+R<-0.008314
+temp<-resp$SoilT
+DOC<-0.5
+mic<-0.5
+Dgas<-1.67
+BD<-0.8
+PD<-2.52
+theta=resp$SoilM
+cmin3=resp$flux/100
+```
+
+
+```{r}
+DOCdata <- read.csv(file="DOC.csv")
+MICdata <- read.csv(file="biomassC.csv")
+resp<-read.csv(file="mydataFluxRight.csv", sep=",",header=T, na.strings="NA")
+meanresp=mean(resp$flux,na.rm=T)
+resp$flux[is.na(resp$flux)]<-meanresp #replace NAs with mean
+resp$flux=resp$flux/100 #make units same as model output
+MICdist=sample(MICdata$biomassCugCcm3,4561,replace=T)
+DOCdist=sample(DOCdata$DOCugCcm3,4561,replace=T)
+
+init.cond <- list()
+init.cond[[1]] = list(Aupt=1.5E8,Eaupt=45,Kmupt=0.3,KmO2=0.4,cue=0.3)
+init.cond[[2]] = list(Aupt=1.3E8,Eaupt=48,Kmupt=0.4,KmO2=0.3,cue=0.4)
+init.cond[[3]] = list(Aupt=1.4E8,Eaupt=50,Kmupt=0.5,KmO2=0.2,cue=0.5)
+
+full.dat <- list(I = 4561,mic=MICdist, DOC=DOCdist,cmin3=resp$flux,temp=resp$SoilT,theta=resp$SoilM,R=8.31E-3,Dgas=1.67,BD=0.8,PD=2.52)
+```
+
+```{r}
+fit.1 <-sampling(comp_stan, iter=2000,
+		              data = full.dat, chains = 3, init = init.cond)  # You can increase the number of iterations if convergence was not reached.
+
+##fit.1 <- stan(model_code = stan_code, iter = 2000, data = tsca_ap.dat, chains = 3, init = init.cond)  #If you can't compile in the previous chunk, run this code. The code of the rest of chunks remain the same.
+
+print(fit.1)
+```
+
+```{r}
+traceplot(fit.1, pars = fit.1@model_pars[1])  #plot the value of parameter estimates for each iteration
+traceplot(fit.1, pars = fit.1@model_pars[2])
+```
+
+```{r}
+pars.1 <- as_tibble(summary(fit.1)$summary[1:2]) #extract the value of parameter estimates
+ggplot(data.frame(x=c(0,1000)), aes(x)) + stat_function(fun=function(x) 2.6888*x/(97.285+x),geom = "line", color = "green") + stat_function(fun=function(x) pars.1$value[1]*x/(pars.1$value[2]+x),geom = "line", color = "red") + geom_point(aes(x = concentration, y = activity), data = tsca_ap) + labs(x = "concentration", y = "activity") 
+```
+
