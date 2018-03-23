@@ -58,8 +58,13 @@ shape ~ gamma(0.1,0.1);
 }
 "
 
-comp_stan <- stan_model(model_code = stan_code)  #Compile stan code and then call it in r which will save a lot of time by not recompiling each time fitting different datasets. If you can't compile the stan code, go to chunk 4 and run the 'stan()' function by deleting '##'. If you can, run the rest of chunks as usual.
+### ALTERNATIVELY THE MODEL COULD BE BROKEN UP AS FOLLOWS:
+# for (i in 1:I)
+# O2[i]=Dgas*0.209*((1-(BD/PD)-theta[i]))^3/4
+# Vm=Aupt*(exp(-Eaupt/(R*(temp[i]+273))))
+# Ecmin[i]=(1-cue)*mic[i]*Vm*DOC[i]/(Kmupt+DOC[i])*O2[i]/(kMO2+O2[i])
 
+comp_stan <- stan_model(model_code = stan_code)  #Compile stan code and then call it in r which will save a lot of time by not recompiling each time fitting different datasets. If you can't compile the stan code, go to chunk 4 and run the 'stan()' function by deleting '##'. If you can, run the rest of chunks as usual.
 ```
 
 
